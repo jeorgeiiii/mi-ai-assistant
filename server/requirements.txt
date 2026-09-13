@@ -20,3 +20,4 @@ ipython
 
 uvicorn
 fastapi[all]
+Pillow

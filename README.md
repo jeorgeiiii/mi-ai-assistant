@@ -16,269 +16,389 @@
 ![OpenShift](https://img.shields.io/badge/OpenShift-EE0000?style=for-the-badge&logo=red-hat-openshift&logoColor=white)
 ![Nginx](https://img.shields.io/badge/nginx-%23009639.svg?style=for-the-badge&logo=nginx&logoColor=white)
 ![Google Cloud](https://img.shields.io/badge/GoogleCloud-%234285F4.svg?style=for-the-badge&logo=google-cloud&logoColor=white)
+![Cloudflare](https://img.shields.io/badge/Cloudflare-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)
 
-A conversational AI assistant web application built with a Microservices Architecture. It connects to Google services (Calendar, Gmail, Tasks) via specialized agents and is orchestrated by LangGraph.
+A conversational AI assistant that acts as the single control point for your entire Google productivity stack — **Calendar, Gmail, Tasks, Drive, Sheets, Docs, Slides, Forms, and Contacts** — plus live web search and image understanding, all through one chat interface. It's built as a multi-agent system with LangGraph: a "Smart Router" reads what you're asking for and hands the request to a specialized expert agent that knows exactly which Google API calls to make.
 
-The application helps manage schedules, emails, and tasks while maintaining persistent memory across sessions. It is fully containerized with Docker and designed for enterprise deployment on Red Hat OpenShift.
-
----
-
-## Architectural Features
-
-- **Microservices Architecture:** Decoupled Frontend (Next.js/Nginx) and Backend (FastAPI/Python) containers.
-
-- **Advanced Agentic Router:** The backend utilizes a "Smart Router" (built with LangGraph) to analyze user requests and delegate tasks to the correct expert: Calendar, Email, Tasks, Search, or Conversational.
-
-- **Specialized Expert Agents:** Each task area is handled by a dedicated agent with its own tools and robust system prompts, ensuring accuracy and adherence to safety protocols.
-
-- **Safe, Multi-Step Workflows:** Critical actions like deleting events, sending emails, or completing tasks require explicit user confirmation, ensuring a safe and predictable user experience.
-
-- **Robust Error Handling:** The assistant is designed to handle API or connection errors gracefully, providing clear feedback to the user (e.g., "I'm having trouble connecting to Google Calendar") instead of crashing.
-
-- **Dynamic Conversation History:** Features a sidebar displaying previous chat sessions. Users can switch between conversations, rename them for better organization, and the assistant maintains context for each session.
-
-- **Persistent Memory:** Uses Docker Volumes and OpenShift PVCs (Persistent Volume Claims) to store conversation history (sqlite) and authentication tokens (token.json) permanently.
-
-- **Conversational AI Core:** Powered by LangGraph and Groq's Llama 3 for stateful, low-latency conversations.
-
-- **Google Calendar Integration:**
-
-  + **Natural Language Understanding:** Parses queries like "tomorrow at 4 PM" or "next week" into precise dates and times, powered by the `parsedatetime` library.
-  + **Full Event Management (CRUD):** Can create, read, update, and delete calendar events. It intelligently checks for scheduling conflicts and handles complex requests like "Move my meeting to 5 PM."
-  
-
-- **Gmail Integration:**
-
-   + **Intelligent Search & Summarization:** Filters emails by sender, status, keywords, and time range (e.g., "last 2 days") and summarizes their content.
-
-   + **Autonomous Composition:** Can compose and draft emails and replies based on high-level user intent (e.g., "Reply and tell them I'm interested").
-
-   + **Full Email Management:** Can create drafts, send drafts (with user confirmation), archive, and delete emails.
-
-
-- **Google Tasks Integration:**
-
-   + **Full Task Management:** Allows the user to add, list, update, complete, and delete tasks from their Google Tasks lists.
-
-   + **Natural Language Due Dates:** Understands due dates like "for tomorrow" or "for next Friday" when adding tasks.
-
-- **General Knowledge Q&A:** Uses the Tavily Search API for real-time information retrieval, with mandatory search rule and source citation.
-
-- **Modern Web Interface (Frontend):**
-
-  - Clean, responsive chat interface built with React and styled with Tailwind CSS.
-
-  - Real-time message updates and "Assistant is thinking..." indicators.
-
-  - Sidebar for managing multiple conversations with renaming capabilities.
+Think of it as one assistant that can see and act across your entire connected Google ecosystem — instead of switching between nine different apps, you just say what you want.
 
 ---
 
-## Architecture Diagram
+## Table of Contents
 
-The assistant operates on a router-based agentic architecture. All user input is first evaluated by a "Smart Router" which then delegates the task to the appropriate specialized expert.
+- [What it can do](#what-it-can-do)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Setup Guide](#setup-guide)
+  - [1. Clone & Install](#1-clone--install)
+  - [2. Connecting Your Google Ecosystem](#2-connecting-your-google-ecosystem)
+  - [3. Environment Variables](#3-environment-variables)
+  - [4. Run It Locally](#4-run-it-locally)
+  - [5. First-Time Google Login](#5-first-time-google-login)
+- [Using the Assistant — Example Prompts](#using-the-assistant--example-prompts)
+- [Security: Locking the App to Only You](#security-locking-the-app-to-only-you)
+- [Personalizing the UI (Themes & Backgrounds)](#personalizing-the-ui-themes--backgrounds)
+- [Deployment Options](#deployment-options)
+  - [Option A — Cloudflare Tunnel (fastest, free, keeps data local)](#option-a--cloudflare-tunnel-fastest-free-keeps-data-local)
+  - [Option B — Docker Compose (local, containerized)](#option-b--docker-compose-local-containerized)
+  - [Option C — Red Hat OpenShift (production-style cloud deploy)](#option-c--red-hat-openshift-production-style-cloud-deploy)
+- [Known Limitations](#known-limitations)
+- [Example Usage](#example-usage)
+- [Author](#author)
+
+---
+
+## What it can do
+
+The backend is a LangGraph state machine with **11 expert nodes**. A router model classifies every message and sends it to the right expert — each expert only has the tools relevant to its domain, which keeps responses focused and prevents the model from calling the wrong API.
+
+| Domain | Agent capabilities |
+|---|---|
+| 📅 **Calendar** | List/search events by day or range, find free time slots, create events (with automatic conflict checking), update, and delete — all from natural language like "next Tuesday at 4pm". |
+| 📧 **Gmail** | Search by sender/subject/keyword/status/time range, read summaries, create and send drafts, reply to threads, archive, and delete — always drafts first and asks for confirmation before sending. |
+| ✅ **Tasks** | List, add (with natural-language due dates), update, complete, and delete tasks across your Google Tasks lists. |
+| 📁 **Drive** | Search files, list recently modified files, create folders, share files/folders with specific people, delete files. |
+| 📊 **Sheets** | Create new spreadsheets, read cell ranges, overwrite ranges, append rows. |
+| 📄 **Docs** | Create new documents (with initial content), read full document text, append text to existing docs. |
+| 📽️ **Slides** | Create new presentations, add slides with title/body text, list existing slides. |
+| 📝 **Forms** | Create new forms, add questions (short answer, paragraph, multiple choice, checkbox), read a form's structure, list submitted responses. |
+| 👤 **Contacts** | Search contacts, list contacts, resolve a name to an email address (handy right before sending an email or inviting someone to an event). |
+| 🔍 **Search** | Real-time web search via Tavily, with mandatory source citation — never answers factual questions from memory alone. |
+| 🖼️ **Vision** | Attach an image in the chat and ask about it — object/scene description, reading text in the image, etc. Routed automatically to a vision-capable model whenever an image is attached. |
+
+**Safety by design:** every destructive or irreversible action (deleting an event, sending an email, deleting a Drive file, deleting a task) requires the agent to first identify the exact item, state what it's about to do, and get explicit confirmation from you before acting.
+
+**On top of that:**
+- **Smart, LLM-generated chat titles** — instead of just truncating your first message, a lightweight model reads the opening exchange and names the conversation something meaningful (e.g. asking about tigers gets titled *"Tiger Habitat and Diet"*, not `"tell me about tige..."`).
+- **Markdown-rendered responses** — tables, bold text, bullet lists, and code blocks render properly instead of showing raw `**`/`|` syntax.
+- **8 visual themes** (Aurora, Ocean, Cosmos, Metropolis, Sunset, Wildlife, Rajasthan, Desert) — each with its own rotating background photo set and accent color, switchable from a floating theme picker.
+- **Password-gated access** — the whole app (including direct API access) requires a shared secret, so a public link can't be used by strangers to touch your Google account. See [Security](#security-locking-the-app-to-only-you).
+
+---
+
+## Architecture
 
 ```mermaid
 graph TD
-    User["User (Web Interface)"] <--> Frontend["Frontend (Next.js/Nginx)"];
-    Frontend <-->|HTTP/JSON| Backend["Backend API (FastAPI)"];
-    
+    User["User (Web Interface)"] <--> Frontend["Frontend (Next.js)"];
+    Frontend <-->|HTTP/JSON + Access Key| Backend["Backend API (FastAPI)"];
+
     subgraph "Backend Container"
-        Router{"Smart Router (LangGraph)"};
-        Backend --> Router;
-        
+        Backend --> Gate{"Access Key Check"};
+        Gate --> Router{"Smart Router (LangGraph)"};
+
         Router --> Calendar[Calendar Agent];
         Router --> Email[Email Agent];
-        Router --> Search[Search Agent];
         Router --> Tasks[Task Agent];
-        
-        Calendar <-->|Auth| GCal["Google Calendar API"];
-        Email <-->|Auth| GMail["Gmail API"];
-        Tasks <-->|Auth| GTasks["Google Tasks API"];
+        Router --> Drive[Drive Agent];
+        Router --> Sheets[Sheets Agent];
+        Router --> Docs[Docs Agent];
+        Router --> Slides[Slides Agent];
+        Router --> Forms[Forms Agent];
+        Router --> Contacts[Contacts Agent];
+        Router --> Search[Search Agent];
+        Router --> Vision[Vision Agent];
+        Router --> Conversational[Conversational Agent];
+
+        Calendar & Email & Tasks & Drive & Sheets & Docs & Slides & Forms & Contacts -->|OAuth 2.0| GoogleAPIs["Google Workspace APIs"];
         Search <--> Tavily["Tavily Search API"];
-        
+        Vision <--> GroqVision["Groq Vision Model (Qwen)"];
+
         DB[("SQLite (Persistent Volume)")]
         Router -.->|Checkpoints| DB
     end
 ```
 
----
-
-## Technologies Used
-
-#### Backend:
-
-- **Framework:** FastAPI
-
-- **AI/Agent Framework:** LangChain & LangGraph
-
-- **LLM:** Groq API (Llama 3 models)
-
-- **Web Server:** Uvicorn
-
-- **Database:** SQLite (for LangGraph checkpoints & chat titles)
-
-- **Key Python Libraries:** google-api-python-client, google-auth-oauthlib, parsedatetime, python-dotenv, Pydantic
-
-#### Frontend:
-
-- **Framework:** Next.js (App Router)
-
-- **Language:** TypeScript
-
-- **UI Library:** React
-
-- **Styling:** Tailwind CSS
-
-
-#### Infrastructure & DevOps:
-
-
-- **Containerization:** Docker & Docker Compose
-
-- **Orchestration:** OpenShift (CRC) / Kubernetes
-
-- **Web Server:** Nginx (serving the frontend container)
-
-#### External Services:
-
-- Google Calendar API
-
-- Google Gmail API
-
-- Google Tasks API
-
-- Tavily Search API
-
+Each domain agent is its own LangGraph node with a dedicated system prompt and its own bound tool set — the router never lets, say, the Calendar agent accidentally call a Gmail tool.
 
 ---
 
-## Installation & Setup
+## Tech Stack
 
-Prerequisites: `Docker Desktop` installed.
+**Backend:** FastAPI · LangChain & LangGraph · Groq API (`openai/gpt-oss-120b` for reasoning/tool-use, `qwen/qwen3.6-27b` for vision) · Uvicorn · SQLite (LangGraph checkpoints + chat titles) · Pillow (image resizing) · `google-api-python-client` / `google-auth-oauthlib` · `parsedatetime` · Pydantic
 
-**1. Clone the Repository:**
+**Frontend:** Next.js (App Router) · TypeScript · React · Tailwind CSS · `react-markdown` + `remark-gfm` (formatted responses)
+
+**Infrastructure:** Docker & Docker Compose · OpenShift/Kubernetes manifests · Nginx (frontend container) · Cloudflare Tunnel (free public exposure without cloud hosting)
+
+**External services:** Google Calendar, Gmail, Tasks, Drive, Sheets, Docs, Slides, Forms, and People (Contacts) APIs · Tavily Search API
+
+---
+
+## Setup Guide
+
+### 1. Clone & Install
 
 ```bash
-git clone https://github.com/berkyalkn/ai-personal-assistant.git
+git clone https://github.com/jeorgeiiii/ai-personal-assistant.git
 cd ai-personal-assistant
+
+# Backend
+cd server
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
+pip install -r requirements.txt
+
+# Frontend
+cd ../client
+npm install
 ```
 
-**2. Configure Environment & Credentials:**
+### 2. Connecting Your Google Ecosystem
 
-- **1:  Create a `.env` file in the `server/` directory.**
+This is the part that turns "a chatbot" into "your connected assistant." You need one Google Cloud project with 9 APIs enabled and an OAuth client.
+
+<details>
+<summary><strong>Click to expand: full Google Cloud Console walkthrough</strong></summary>
+
+**Step 1 — Create (or pick) a project**
+Go to [console.cloud.google.com](https://console.cloud.google.com/), and create a new project (or select an existing one) from the project dropdown at the top.
+
+**Step 2 — Enable the APIs**
+Go to **APIs & Services → Library** and enable each of these individually (search the name, click it, click **Enable**):
+- Google Calendar API
+- Gmail API
+- Tasks API
+- Google Drive API
+- Google Sheets API
+- Google Docs API
+- Google Slides API
+- Google Forms API
+- **People API** (this is what powers Contacts — it's a different product from the deprecated "Contacts API," don't confuse the two)
+
+**Step 3 — Configure the OAuth consent screen**
+Go to **APIs & Services → OAuth consent screen** (labeled "Google Auth Platform" in newer Console UI):
+- Choose **External** (or **Internal** if you're on a Google Workspace org) and fill in the basic app info.
+- Under **Test users**, add your own Google account. While the app is in "Testing" publishing status, only listed test users can complete the OAuth flow — skip this and you'll hit an "Access blocked" error.
+
+**Step 4 — Add the scopes**
+Still on the consent screen, go to **Data Access → Add or remove scopes**, filter for each API name, and check the corresponding scope:
+
+| Filter for | Scope to check |
+|---|---|
+| Calendar | `.../auth/calendar` |
+| Gmail | `.../auth/gmail.modify` |
+| Tasks | `.../auth/tasks` |
+| Drive | `.../auth/drive` |
+| Sheets | `.../auth/spreadsheets` |
+| Docs | `.../auth/documents` |
+| Slides | `.../auth/presentations` |
+| Forms | `.../auth/forms.body` and `.../auth/forms.responses.readonly` |
+| Contacts/People | `.../auth/contacts.readonly` |
+
+Click **Update**, then **Save**.
+
+**Step 5 — Create the OAuth Client ID**
+Go to **APIs & Services → Credentials → Create Credentials → OAuth Client ID**.
+- Application type: **Desktop app**.
+- Once created, download the JSON.
+- Rename it to `credentials.json` and place it inside the `server/` directory.
+
+**Step 6 — Redirect URI**
+This project's OAuth flow runs a temporary local server on port `8090` to catch the redirect. Since it's a "Desktop app" client type, Google allows `http://localhost` redirects automatically — no manual redirect URI configuration needed for local use.
+
+</details>
+
+Once this is done, `server/credentials.json` should exist and all 9 APIs + scopes are ready. You do **not** need to manually generate `token.json` — the app creates it automatically the first time it needs to talk to Google (see [First-Time Google Login](#5-first-time-google-login)).
+
+### 3. Environment Variables
+
+Create `server/.env`:
 
 ```bash
-GROQ_API_KEY="gsk_YourGroqApiKey"
-TAVILY_API_KEY="tvly-YourTavilyApiKey"
+GROQ_API_KEY="gsk_YourGroqApiKey"       # https://console.groq.com — free tier available
+TAVILY_API_KEY="tvly-YourTavilyApiKey"  # https://tavily.com — free tier available
+ACCESS_KEY="choose-a-strong-password"   # locks the whole app down, see Security section
 ```
 
-- **2: Google Credentials:**
-
-   - Download your OAuth 2.0 Client ID JSON from Google Cloud Console.
-
-   - **Important:** Ensure `http://localhost:8090/` is added to "Authorized Redirect URIs" in Google Console.
-
-   - Save the file as `credentials.json` inside the `server/` directory.
-
-   - Create empty files for persistence:
+Optionally, create `client/.env.local` if your backend won't be reachable at `http://127.0.0.1:5001` (e.g. deploying, or using a tunnel):
 
 ```bash
+NEXT_PUBLIC_API_URL=https://your-backend-url
+```
+
+### 4. Run It Locally
+
+```bash
+# Terminal 1 — backend
+cd server
+venv\Scripts\python -m uvicorn main:app_fastapi --host 0.0.0.0 --port 5001
+
+# Terminal 2 — frontend
+cd client
+npm run dev
+```
+
+Open **http://localhost:3000**.
+
+### 5. First-Time Google Login
+
+The first time any Google-connected tool actually runs (e.g. you ask "what's on my calendar?"), the backend will print an authorization URL to its terminal — it can't open a browser automatically. Copy that URL, open it, sign in with the Google account you added as a test user, and approve all the requested permissions. It redirects to `localhost:8090`, and `server/token.json` is created automatically. From then on, you won't need to log in again unless the token is revoked or deleted.
+
+---
+
+## Using the Assistant — Example Prompts
+
+Once connected, here's what a "complete ecosystem" actually looks like in practice — you can move across all of these in a single conversation:
+
+```
+"What's on my calendar this week?"
+"Schedule a call with jane@example.com tomorrow at 3pm for 30 minutes"
+"Find a free 1-hour slot tomorrow between 9am and 5pm"
+
+"Show me unread emails from my manager"
+"Draft a reply saying I'll have it ready by Friday"
+
+"Add 'renew passport' to my tasks, due next Monday"
+"What tasks do I have left?"
+
+"Search my Drive for the Q3 report"
+"Create a folder called Client Onboarding"
+"Share that file with someone@example.com as a viewer"
+
+"Create a spreadsheet called Monthly Budget"
+"Read A1:D10 from that sheet"
+
+"Create a doc called Meeting Notes and write 'Agenda: ...' in it"
+
+"Create a presentation called Team Update"
+"Add a slide titled 'Q3 Results'"
+
+"Create a form called Customer Feedback"
+"Add a multiple choice question asking how satisfied they are"
+
+"What's Sarah's email address?"
+
+[attach a photo] "What's in this image?"
+
+"What's the latest news on the James Webb telescope?"
+```
+
+The Smart Router figures out which expert handles each message — you never need to specify which "mode" you're in.
+
+---
+
+## Security: Locking the App to Only You
+
+This is a **single-user** assistant — one Google account, one `token.json`, tied to whoever set it up. That means anyone with the URL could otherwise read/send your email, edit your calendar, or delete your files just by chatting with it. To prevent that, every real API endpoint is protected by a shared access key, enforced **on the backend itself** — not just hidden in the UI — so it can't be bypassed by calling the API directly instead of the website.
+
+- Set `ACCESS_KEY` in `server/.env` to whatever password you want.
+- On first visit, the frontend shows a lock screen. Enter the password once per browser — it's remembered after that via `localStorage`.
+- Anyone without the correct key gets blocked with: *"Sorry Only Prince Mehra can use this website"*.
+- To change the password later, just update `ACCESS_KEY` in `.env` and restart the backend — anyone with the old password (including your own other browsers) will be automatically re-locked.
+
+⚠️ This is a simple shared-secret gate, not full multi-user authentication — good enough to keep strangers out of a personal project, not a substitute for proper auth if you ever open this up to multiple real users.
+
+---
+
+## Personalizing the UI (Themes & Backgrounds)
+
+Click the floating palette button (bottom-right corner) to switch between 8 visual themes. Each theme swaps both the rotating background photography (crossfades every 3 minutes) and the app's accent color (buttons, highlights, message bubbles) in one click. Your choice is remembered per-browser.
+
+Want to add your own theme? Edit `client/src/app/themes.ts` — each entry just needs an `id`, `name`, `accent` hex color, and an array of image URLs.
+
+---
+
+## Deployment Options
+
+### Option A — Cloudflare Tunnel (fastest, free, keeps data local)
+
+Best option if you want a real public link without migrating anything, and you're fine with your PC needing to stay on and running. Nothing leaves your machine — Cloudflare just relays traffic to your locally-running servers.
+
+```bash
+# Install (Windows, via winget)
+winget install --id Cloudflare.cloudflared -e
+
+# Terminal 1: tunnel the backend
+cloudflared tunnel --url http://localhost:5001
+# copy the https://xxxx.trycloudflare.com URL it prints
+
+# Set that URL as your frontend's API target
+echo NEXT_PUBLIC_API_URL=https://xxxx.trycloudflare.com > client/.env.local
+
+# Restart the frontend so it picks up the new env var, then:
+# Terminal 2: tunnel the frontend
+cloudflared tunnel --url http://localhost:3000
+```
+
+Share the frontend tunnel's URL. Note: Cloudflare's free "quick tunnels" don't have a fixed hostname — if you restart `cloudflared`, you'll get new URLs and need to update `client/.env.local` again. For a permanent hostname, set up a [Named Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) with a free Cloudflare account and a domain.
+
+### Option B — Docker Compose (local, containerized)
+
+Prerequisites: `Docker Desktop`.
+
+```bash
+# server/.env and server/credentials.json must already exist (see Setup Guide)
 touch server/token.json server/conversations.sqlite
-```
 
-**3. Build & Run (Docker Compose):**
-
-Start the entire system with one command. This will build images, create networks, and mount volumes.
-
-```bash
 docker-compose up --build
 ```
 
+First-time Google login works the same way as local dev — check the terminal logs for the authorization link (the container can't open a browser for you); the generated `token.json` persists back to your machine via the mounted Docker volume.
 
-**4. First-Time Authentication (Crucial Step!)**
+### Option C — Red Hat OpenShift (production-style cloud deploy)
 
-Since the app runs inside a container, it cannot open your browser automatically.
+This repo includes Kubernetes manifests under `openshift/` for a proper containerized cloud deployment.
 
- - 1: Check the terminal logs. You will see a link saying **"Please visit this URL to authorize..."**.
-
- - 2: Click the link and login with your Google Account.
-
- - 3: The redirection will be handled by the mapped port (`8090`), and the generated `token.json` will be saved to your local machine automatically via Docker Volumes.
-
----
-
-## Cloud Deployment (Red Hat OpenShift)
-
-This project includes production-ready Kubernetes manifests **for Red Hat OpenShift**.
-
-**Prerequisites:** `oc` CLI installed, logged in, and a Docker Hub account.
-
-
-**1. Push Images to Registry**
+**Prerequisites:** `oc` CLI installed and logged in, a Docker Hub account.
 
 ```bash
-# Backend
+# 1. Push images
 cd server
 docker build -t youruser/personal-assistant-backend:v1 .
 docker push youruser/personal-assistant-backend:v1
 
-# Frontend (Requires Backend URL later, push a placeholder first or skip)
-```
-
-**2. Setup Project & Secrets**
-
-```bash
+# 2. Project + secrets
 oc new-project personal-assistant
-
-# Create Secrets from your local files
 oc create secret generic backend-secrets --from-env-file=server/.env
 oc create secret generic google-credentials --from-file=server/credentials.json
-
-# Create Persistent Storage (1Gi) for DB and Tokens
 oc apply -f openshift/storage.yaml
-```
 
-**3. Deploy Backend & Sync Data**
-
-```bash
-# Deploy Backend
- Deploy Backend
+# 3. Deploy backend, then sync local auth/data to the pod
 oc apply -f openshift/backend.yaml
-
-# Wait for pod to be Running...
-# Then copy your local auth token and database to the remote persistent volume
-# (Find POD_NAME via `oc get pods`)
 oc rsync ./server/data/ POD_NAME:/app/data
-```
 
-**4. Build & Deploy Frontend**
-
-The Frontend needs the live Backend URL at build time (Static Export).
-
-- 1. Get Backend Route: `oc get route assistant-backend-route`
-
-- 2. Build Frontend:
-
-```bash
+# 4. Frontend needs the live backend URL baked in at build time
+oc get route assistant-backend-route
 cd client
 docker build --build-arg NEXT_PUBLIC_API_URL=http://YOUR_BACKEND_ROUTE_URL -t youruser/personal-assistant-frontend:v1 .
 docker push youruser/personal-assistant-frontend:v1
-```
-
-- 3 Deploy:
-
-```bash
 oc apply -f openshift/frontend.yaml
 ```
 
-Your assistant is now live on the OpenShift Route!
+> **Note:** the OpenShift manifests predate the Drive/Sheets/Docs/Slides/Forms/Contacts/Vision additions — the backend secret still just needs `GROQ_API_KEY`, `TAVILY_API_KEY`, and now also `ACCESS_KEY`, but double-check `server/requirements.txt` (now includes `Pillow`) is picked up in your image build.
 
 ---
 
+## Known Limitations
+
+Being upfront about what this project is *not*, so you know what you're working with:
+
+- **Single-user only.** One Google account per deployment, tied to one `token.json`. Not a multi-tenant SaaS.
+- **Vision is single-turn.** You can't ask a follow-up about a previously attached image without re-attaching it — this keeps each image analysis independent and avoids blowing through free-tier rate limits.
+- **Groq free-tier rate limits are real**, especially for the vision model (small per-minute token budgets, max images per request). Heavy use will surface a friendly rate-limit message rather than a crash, but it will still block you temporarily.
+- **Broad OAuth scopes.** For simplicity, scopes are full-access (e.g. entire Drive, entire Calendar) rather than minimally-scoped. Whoever holds `token.json` has wide account access — keep it private.
+- **Contacts is read-only** — no create/update/delete.
+- **No pagination** on list/search tools — results are capped at a `max_results` parameter, so very large mailboxes/drives only show a slice.
+- **SQLite-backed history** — fine for one user, not built for concurrent multi-user writes.
+- **The access-key gate is a shared secret, not real auth** (see [Security](#security-locking-the-app-to-only-you)).
+
+---
 
 ## Example Usage
 
 A quick glimpse of the AI Personal Assistant in action:
 
 ![AI Personal Assistant Screenshot](/assets/screenshot.png)
+
+---
+
+## Author
+
+**Prince Mehra**
+
+- Portfolio: [portfolio-ruddy-seven-7slackrg3a.vercel.app](https://portfolio-ruddy-seven-7slackrg3a.vercel.app/)
+- GitHub: [@jeorgeiiii](https://github.com/jeorgeiiii)
+- LinkedIn: [prince-mehra-b3322935a](https://www.linkedin.com/in/prince-mehra-b3322935a/)
+- LeetCode: [PrinceMehra](https://leetcode.com/u/PrinceMehra/)

@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
         - name: assistant-frontend
-          image: berkayalkn/personal-assistant-frontend:v1
+          image: youruser/personal-assistant-frontend:v1
           ports:
             - containerPort: 8080
           resources:

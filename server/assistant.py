@@ -47,9 +47,16 @@ groq_api_key = os.getenv("GROQ_API_KEY")
 tavily_api_key = os.getenv("TAVILY_API_KEY") 
 
 SCOPES = [
-    "https://www.googleapis.com/auth/calendar", 
+    "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/tasks"
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/presentations",
+    "https://www.googleapis.com/auth/contacts.readonly",
+    "https://www.googleapis.com/auth/forms.body",
+    "https://www.googleapis.com/auth/forms.responses.readonly"
 ]
 
 if not all([groq_api_key, tavily_api_key]):
@@ -57,8 +64,19 @@ if not all([groq_api_key, tavily_api_key]):
 
 
 # For high-quality, reliable, and rule-following responses (the 70b model).
-# Use this for testing complex workflows. 
-llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=groq_api_key, temperature=0)
+# Use this for testing complex workflows.
+llm = ChatGroq(model="openai/gpt-oss-120b", api_key=groq_api_key, temperature=0)
+
+# Vision-capable model for analyzing images the user attaches (text-only models can't read images).
+# reasoning_effort="none" skips this model's internal chain-of-thought (it's a "thinking" model by
+# default), and max_tokens is capped, to stay under Groq's free-tier output-tokens-per-minute limit.
+vision_llm = ChatGroq(
+    model="qwen/qwen3.6-27b",
+    api_key=groq_api_key,
+    temperature=0,
+    max_tokens=700,
+    reasoning_effort="none",
+)
 
 # For rapid development and simple tests (the 8b model).
 # Note: This model is much faster but may not follow complex instructions as precisely.
@@ -967,6 +985,655 @@ def delete_task(task_id: str, task_list_id: str = "@default_id_placeholder") -> 
 
 
 
+@tool
+def search_drive_files(query: str, max_results: int = 10) -> str:
+    """
+    Searches for files and folders in Google Drive by name.
+    Returns each file's name, id, type, and a link to view it.
+    """
+    print(f"--- Tool: search_drive_files called with query: '{query}' ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("drive", "v3", credentials=creds)
+
+        results = service.files().list(
+            q=f"name contains '{query}' and trashed = false",
+            pageSize=max_results,
+            fields="files(id, name, mimeType, webViewLink)"
+        ).execute()
+
+        return json.dumps(results.get("files", []), indent=2)
+
+    except Exception as e:
+        print(f"!!! An error occurred in search_drive_files: {e}")
+        return json.dumps([{"error_type": "UnknownError", "details": str(e)}])
+
+
+@tool
+def list_recent_drive_files(max_results: int = 10) -> str:
+    """Lists the most recently modified files in the user's Google Drive."""
+    print(f"--- Tool: list_recent_drive_files called with max_results={max_results} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("drive", "v3", credentials=creds)
+
+        results = service.files().list(
+            q="trashed = false",
+            pageSize=max_results,
+            orderBy="modifiedTime desc",
+            fields="files(id, name, mimeType, modifiedTime, webViewLink)"
+        ).execute()
+
+        return json.dumps(results.get("files", []), indent=2)
+
+    except Exception as e:
+        print(f"!!! An error occurred in list_recent_drive_files: {e}")
+        return json.dumps([{"error_type": "UnknownError", "details": str(e)}])
+
+
+@tool
+def create_drive_folder(folder_name: str, parent_folder_id: Optional[str] = None) -> str:
+    """Creates a new folder in Google Drive, optionally inside a parent folder."""
+    print(f"--- Tool: create_drive_folder called with name: '{folder_name}' ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("drive", "v3", credentials=creds)
+
+        file_metadata = {
+            "name": folder_name,
+            "mimeType": "application/vnd.google-apps.folder"
+        }
+        if parent_folder_id:
+            file_metadata["parents"] = [parent_folder_id]
+
+        folder = service.files().create(body=file_metadata, fields="id, name, webViewLink").execute()
+
+        return f"Success! Folder '{folder.get('name')}' was created. Link: {folder.get('webViewLink')}"
+
+    except Exception as e:
+        print(f"!!! An error occurred in create_drive_folder: {e}")
+        return f"An error occurred while creating the folder: {e}"
+
+
+@tool
+def share_drive_file(file_id: str, email: str, role: str = "reader") -> str:
+    """
+    Shares a Google Drive file or folder with a specific person by email.
+    The role can be 'reader', 'commenter', or 'writer'.
+    """
+    print(f"--- Tool: share_drive_file called for file_id={file_id}, email={email}, role={role} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("drive", "v3", credentials=creds)
+
+        permission = {"type": "user", "role": role, "emailAddress": email}
+        service.permissions().create(fileId=file_id, body=permission, sendNotificationEmail=True).execute()
+
+        return f"Success! The file was shared with {email} as a {role}."
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The file with ID '{file_id}' was not found."
+        return f"An error occurred with the Drive API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while sharing the file: {e}"
+
+
+@tool
+def delete_drive_file(file_id: str, file_name: str) -> str:
+    """
+    Permanently deletes a file or folder from Google Drive using its unique ID.
+    To use this tool, you must first find the file and its 'id' using `search_drive_files` or `list_recent_drive_files`.
+    """
+    print(f"--- Tool: delete_drive_file called for file_id={file_id} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("drive", "v3", credentials=creds)
+        service.files().delete(fileId=file_id).execute()
+
+        return f"Success: '{file_name}' was permanently deleted from Drive."
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The file with ID '{file_id}' was not found."
+        return f"An error occurred with the Drive API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while deleting the file: {e}"
+
+
+@tool
+def create_spreadsheet(title: str) -> str:
+    """Creates a new, empty Google Sheet with the given title."""
+    print(f"--- Tool: create_spreadsheet called with title: '{title}' ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("sheets", "v4", credentials=creds)
+
+        spreadsheet = service.spreadsheets().create(
+            body={"properties": {"title": title}},
+            fields="spreadsheetId,spreadsheetUrl"
+        ).execute()
+
+        return f"Success! Spreadsheet '{title}' was created. Link: {spreadsheet.get('spreadsheetUrl')} (ID: {spreadsheet.get('spreadsheetId')})"
+
+    except Exception as e:
+        print(f"!!! An error occurred in create_spreadsheet: {e}")
+        return f"An error occurred while creating the spreadsheet: {e}"
+
+
+@tool
+def read_sheet_values(spreadsheet_id: str, cell_range: str) -> str:
+    """
+    Reads values from a Google Sheet within a given A1 notation range (e.g., "Sheet1!A1:C10").
+    """
+    print(f"--- Tool: read_sheet_values called for spreadsheet_id={spreadsheet_id}, range={cell_range} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("sheets", "v4", credentials=creds)
+
+        result = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=cell_range
+        ).execute()
+
+        return json.dumps(result.get("values", []), indent=2)
+
+    except HttpError as error:
+        return f"An error occurred with the Sheets API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while reading the sheet: {e}"
+
+
+@tool
+def write_sheet_values(spreadsheet_id: str, cell_range: str, values: List[List[str]]) -> str:
+    """
+    Writes (overwrites) values into a Google Sheet within a given A1 notation range (e.g., "Sheet1!A1:C2").
+    'values' must be a list of rows, where each row is a list of cell values.
+    """
+    print(f"--- Tool: write_sheet_values called for spreadsheet_id={spreadsheet_id}, range={cell_range} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("sheets", "v4", credentials=creds)
+
+        service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=cell_range,
+            valueInputOption="USER_ENTERED",
+            body={"values": values}
+        ).execute()
+
+        return "Success! The spreadsheet was updated."
+
+    except HttpError as error:
+        return f"An error occurred with the Sheets API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while writing to the sheet: {e}"
+
+
+@tool
+def append_sheet_row(spreadsheet_id: str, sheet_name: str, values: List[str]) -> str:
+    """
+    Appends a single new row of values to the end of a sheet (e.g., sheet_name="Sheet1").
+    """
+    print(f"--- Tool: append_sheet_row called for spreadsheet_id={spreadsheet_id}, sheet_name={sheet_name} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("sheets", "v4", credentials=creds)
+
+        service.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=sheet_name,
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": [values]}
+        ).execute()
+
+        return "Success! The row was added to the spreadsheet."
+
+    except HttpError as error:
+        return f"An error occurred with the Sheets API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while appending the row: {e}"
+
+
+@tool
+def create_google_doc(title: str, content: Optional[str] = None) -> str:
+    """Creates a new Google Doc with the given title and optional initial text content."""
+    print(f"--- Tool: create_google_doc called with title: '{title}' ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("docs", "v1", credentials=creds)
+
+        doc = service.documents().create(body={"title": title}).execute()
+        document_id = doc.get("documentId")
+
+        if content:
+            service.documents().batchUpdate(
+                documentId=document_id,
+                body={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]}
+            ).execute()
+
+        return f"Success! Document '{title}' was created. Link: https://docs.google.com/document/d/{document_id}/edit"
+
+    except Exception as e:
+        print(f"!!! An error occurred in create_google_doc: {e}")
+        return f"An error occurred while creating the document: {e}"
+
+
+@tool
+def read_google_doc(document_id: str) -> str:
+    """Reads and returns the plain text content of a Google Doc using its document ID."""
+    print(f"--- Tool: read_google_doc called for document_id={document_id} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("docs", "v1", credentials=creds)
+
+        doc = service.documents().get(documentId=document_id).execute()
+
+        text = ""
+        for element in doc.get("body", {}).get("content", []):
+            paragraph = element.get("paragraph")
+            if paragraph:
+                for run in paragraph.get("elements", []):
+                    text_run = run.get("textRun")
+                    if text_run:
+                        text += text_run.get("content", "")
+
+        return text if text else "The document appears to be empty."
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The document with ID '{document_id}' was not found."
+        return f"An error occurred with the Docs API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while reading the document: {e}"
+
+
+@tool
+def append_to_google_doc(document_id: str, text: str) -> str:
+    """Appends text to the end of an existing Google Doc using its document ID."""
+    print(f"--- Tool: append_to_google_doc called for document_id={document_id} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("docs", "v1", credentials=creds)
+
+        doc = service.documents().get(documentId=document_id).execute()
+        end_index = doc.get("body", {}).get("content", [])[-1].get("endIndex", 1) - 1
+
+        service.documents().batchUpdate(
+            documentId=document_id,
+            body={"requests": [{"insertText": {"location": {"index": max(end_index, 1)}, "text": text}}]}
+        ).execute()
+
+        return "Success! The text was appended to the document."
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The document with ID '{document_id}' was not found."
+        return f"An error occurred with the Docs API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while updating the document: {e}"
+
+
+@tool
+def create_presentation(title: str) -> str:
+    """Creates a new, empty Google Slides presentation with the given title."""
+    print(f"--- Tool: create_presentation called with title: '{title}' ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("slides", "v1", credentials=creds)
+
+        presentation = service.presentations().create(body={"title": title}).execute()
+        presentation_id = presentation.get("presentationId")
+
+        return f"Success! Presentation '{title}' was created. Link: https://docs.google.com/presentation/d/{presentation_id}/edit"
+
+    except Exception as e:
+        print(f"!!! An error occurred in create_presentation: {e}")
+        return f"An error occurred while creating the presentation: {e}"
+
+
+@tool
+def add_slide_to_presentation(presentation_id: str, title: str, body_text: Optional[str] = None) -> str:
+    """Adds a new slide with a title and optional body text to an existing presentation."""
+    print(f"--- Tool: add_slide_to_presentation called for presentation_id={presentation_id} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("slides", "v1", credentials=creds)
+
+        slide_id = f"slide_{uuid.uuid4().hex[:8]}"
+        title_id = f"title_{uuid.uuid4().hex[:8]}"
+        body_id = f"body_{uuid.uuid4().hex[:8]}"
+
+        requests_body = [{
+            "createSlide": {
+                "objectId": slide_id,
+                "slideLayoutReference": {"predefinedLayout": "TITLE_AND_BODY"},
+                "placeholderIdMappings": [
+                    {"layoutPlaceholder": {"type": "TITLE"}, "objectId": title_id},
+                    {"layoutPlaceholder": {"type": "BODY"}, "objectId": body_id}
+                ]
+            }
+        }, {
+            "insertText": {"objectId": title_id, "text": title}
+        }]
+
+        if body_text:
+            requests_body.append({"insertText": {"objectId": body_id, "text": body_text}})
+
+        service.presentations().batchUpdate(
+            presentationId=presentation_id, body={"requests": requests_body}
+        ).execute()
+
+        return f"Success! A new slide titled '{title}' was added."
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The presentation with ID '{presentation_id}' was not found."
+        return f"An error occurred with the Slides API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while adding the slide: {e}"
+
+
+@tool
+def list_presentation_slides(presentation_id: str) -> str:
+    """Lists the slides of a presentation along with their titles, using the presentation ID."""
+    print(f"--- Tool: list_presentation_slides called for presentation_id={presentation_id} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("slides", "v1", credentials=creds)
+
+        presentation = service.presentations().get(presentationId=presentation_id).execute()
+
+        slides_summary = []
+        for i, slide in enumerate(presentation.get("slides", []), start=1):
+            title_text = ""
+            for element in slide.get("pageElements", []):
+                shape = element.get("shape")
+                if shape and shape.get("placeholder", {}).get("type") == "TITLE":
+                    for text_element in shape.get("text", {}).get("textElements", []):
+                        text_run = text_element.get("textRun")
+                        if text_run:
+                            title_text += text_run.get("content", "")
+            slides_summary.append({"slide_number": i, "object_id": slide.get("objectId"), "title": title_text.strip()})
+
+        return json.dumps(slides_summary, indent=2)
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The presentation with ID '{presentation_id}' was not found."
+        return f"An error occurred with the Slides API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while listing slides: {e}"
+
+
+@tool
+def search_contacts(query: str, max_results: int = 10) -> str:
+    """Searches the user's Google Contacts by name, email, or phone number."""
+    print(f"--- Tool: search_contacts called with query: '{query}' ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("people", "v1", credentials=creds)
+
+        results = service.people().searchContacts(
+            query=query,
+            readMask="names,emailAddresses,phoneNumbers",
+            pageSize=max_results
+        ).execute()
+
+        contacts = []
+        for result in results.get("results", []):
+            person = result.get("person", {})
+            names = person.get("names", [])
+            emails = person.get("emailAddresses", [])
+            phones = person.get("phoneNumbers", [])
+            contacts.append({
+                "name": names[0].get("displayName") if names else "Unknown",
+                "emails": [e.get("value") for e in emails],
+                "phones": [p.get("value") for p in phones]
+            })
+
+        return json.dumps(contacts, indent=2)
+
+    except Exception as e:
+        print(f"!!! An error occurred in search_contacts: {e}")
+        return json.dumps([{"error_type": "UnknownError", "details": str(e)}])
+
+
+@tool
+def list_contacts(max_results: int = 20) -> str:
+    """Lists the user's Google Contacts, showing their names and email addresses."""
+    print(f"--- Tool: list_contacts called with max_results={max_results} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("people", "v1", credentials=creds)
+
+        results = service.people().connections().list(
+            resourceName="people/me",
+            pageSize=max_results,
+            personFields="names,emailAddresses"
+        ).execute()
+
+        contacts = []
+        for person in results.get("connections", []):
+            names = person.get("names", [])
+            emails = person.get("emailAddresses", [])
+            contacts.append({
+                "name": names[0].get("displayName") if names else "Unknown",
+                "emails": [e.get("value") for e in emails]
+            })
+
+        return json.dumps(contacts, indent=2)
+
+    except Exception as e:
+        print(f"!!! An error occurred in list_contacts: {e}")
+        return json.dumps([{"error_type": "UnknownError", "details": str(e)}])
+
+
+@tool
+def get_contact_email(name: str) -> str:
+    """
+    Looks up a contact by name and returns their email address(es).
+    Useful for resolving a person's name into an email address before sending an email or inviting them to an event.
+    """
+    print(f"--- Tool: get_contact_email called for name: '{name}' ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("people", "v1", credentials=creds)
+
+        results = service.people().searchContacts(
+            query=name,
+            readMask="names,emailAddresses",
+            pageSize=5
+        ).execute()
+
+        matches = []
+        for result in results.get("results", []):
+            person = result.get("person", {})
+            names = person.get("names", [])
+            emails = person.get("emailAddresses", [])
+            if emails:
+                matches.append({
+                    "name": names[0].get("displayName") if names else name,
+                    "emails": [e.get("value") for e in emails]
+                })
+
+        if not matches:
+            return json.dumps({"error_type": "NotFound", "details": f"No contact found matching '{name}'."})
+
+        return json.dumps(matches, indent=2)
+
+    except Exception as e:
+        print(f"!!! An error occurred in get_contact_email: {e}")
+        return json.dumps({"error_type": "UnknownError", "details": str(e)})
+
+
+@tool
+def create_google_form(title: str, description: Optional[str] = None) -> str:
+    """Creates a new Google Form with the given title and optional description."""
+    print(f"--- Tool: create_google_form called with title: '{title}' ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("forms", "v1", credentials=creds)
+
+        form = service.forms().create(body={"info": {"title": title}}).execute()
+        form_id = form.get("formId")
+
+        if description:
+            service.forms().batchUpdate(
+                formId=form_id,
+                body={"requests": [{
+                    "updateFormInfo": {
+                        "info": {"description": description},
+                        "updateMask": "description"
+                    }
+                }]}
+            ).execute()
+
+        responder_uri = form.get("responderUri", f"https://docs.google.com/forms/d/{form_id}/viewform")
+        return f"Success! Form '{title}' was created. Edit link: https://docs.google.com/forms/d/{form_id}/edit | Share link: {responder_uri} (ID: {form_id})"
+
+    except Exception as e:
+        print(f"!!! An error occurred in create_google_form: {e}")
+        return f"An error occurred while creating the form: {e}"
+
+
+@tool
+def add_question_to_form(
+    form_id: str,
+    question_title: str,
+    question_type: str = "TEXT",
+    options: Optional[List[str]] = None,
+    required: bool = False
+) -> str:
+    """
+    Adds a question to an existing Google Form.
+
+    Args:
+        form_id (str): The unique ID of the form.
+        question_title (str): The text of the question.
+        question_type (str): One of "TEXT" (short answer), "PARAGRAPH", "MULTIPLE_CHOICE", or "CHECKBOX".
+        options (Optional[List[str]]): The list of choices, required for "MULTIPLE_CHOICE" or "CHECKBOX".
+        required (bool): Whether an answer to this question is mandatory.
+    """
+    print(f"--- Tool: add_question_to_form called for form_id={form_id}, type={question_type} ---")
+
+    try:
+        if question_type in ("MULTIPLE_CHOICE", "CHECKBOX"):
+            if not options:
+                return f"Error: 'options' must be provided for a {question_type} question."
+            question_body = {
+                "choiceQuestion": {
+                    "type": "RADIO" if question_type == "MULTIPLE_CHOICE" else "CHECKBOX",
+                    "options": [{"value": opt} for opt in options]
+                }
+            }
+        elif question_type == "PARAGRAPH":
+            question_body = {"textQuestion": {"paragraph": True}}
+        elif question_type == "TEXT":
+            question_body = {"textQuestion": {"paragraph": False}}
+        else:
+            return f"Error: Unsupported question_type '{question_type}'. Use TEXT, PARAGRAPH, MULTIPLE_CHOICE, or CHECKBOX."
+
+        creds = _get_google_credentials()
+        service = build("forms", "v1", credentials=creds)
+
+        request_body = {
+            "requests": [{
+                "createItem": {
+                    "item": {
+                        "title": question_title,
+                        "questionItem": {"question": {**question_body, "required": required}}
+                    },
+                    "location": {"index": 0}
+                }
+            }]
+        }
+
+        service.forms().batchUpdate(formId=form_id, body=request_body).execute()
+
+        return f"Success! The question '{question_title}' was added to the form."
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The form with ID '{form_id}' was not found."
+        return f"An error occurred with the Forms API: {error}"
+    except Exception as e:
+        print(f"!!! An error occurred in add_question_to_form: {e}")
+        return f"An unexpected error occurred while adding the question: {e}"
+
+
+@tool
+def read_google_form(form_id: str) -> str:
+    """Reads a Google Form's title, description, and list of questions using its form ID."""
+    print(f"--- Tool: read_google_form called for form_id={form_id} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("forms", "v1", credentials=creds)
+
+        form = service.forms().get(formId=form_id).execute()
+
+        info = form.get("info", {})
+        questions = []
+        for item in form.get("items", []):
+            question_item = item.get("questionItem", {}).get("question", {})
+            questions.append({
+                "title": item.get("title"),
+                "required": question_item.get("required", False),
+                "type": next(iter(question_item.keys()), "unknown") if question_item else None
+            })
+
+        summary = {
+            "title": info.get("title"),
+            "description": info.get("description"),
+            "responder_uri": form.get("responderUri"),
+            "questions": questions
+        }
+        return json.dumps(summary, indent=2)
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The form with ID '{form_id}' was not found."
+        return f"An error occurred with the Forms API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while reading the form: {e}"
+
+
+@tool
+def list_form_responses(form_id: str, max_results: int = 20) -> str:
+    """Lists the submitted responses to a Google Form using its form ID."""
+    print(f"--- Tool: list_form_responses called for form_id={form_id} ---")
+    try:
+        creds = _get_google_credentials()
+        service = build("forms", "v1", credentials=creds)
+
+        result = service.forms().responses().list(formId=form_id, pageSize=max_results).execute()
+        responses = result.get("responses", [])
+
+        if not responses:
+            return json.dumps([])
+
+        parsed_responses = []
+        for response in responses:
+            answers = {}
+            for question_id, answer in response.get("answers", {}).items():
+                text_answers = answer.get("textAnswers", {}).get("answers", [])
+                answers[question_id] = [a.get("value") for a in text_answers]
+            parsed_responses.append({
+                "response_id": response.get("responseId"),
+                "submitted_at": response.get("createTime"),
+                "answers": answers
+            })
+
+        return json.dumps(parsed_responses, indent=2)
+
+    except HttpError as error:
+        if error.resp.status == 404:
+            return f"Error: The form with ID '{form_id}' was not found."
+        return f"An error occurred with the Forms API: {error}"
+    except Exception as e:
+        return f"An unexpected error occurred while listing responses: {e}"
+
+
 calendar_tools = [
     list_upcoming_events,
     get_events_for_day,
@@ -988,28 +1655,74 @@ search_tools = [tavily_search]
 
 task_tools = [list_tasks, add_task, complete_task, update_task, delete_task]
 
+drive_tools = [
+    search_drive_files,
+    list_recent_drive_files,
+    create_drive_folder,
+    share_drive_file,
+    delete_drive_file]
+
+sheets_tools = [
+    create_spreadsheet,
+    read_sheet_values,
+    write_sheet_values,
+    append_sheet_row]
+
+docs_tools = [
+    create_google_doc,
+    read_google_doc,
+    append_to_google_doc]
+
+slides_tools = [
+    create_presentation,
+    add_slide_to_presentation,
+    list_presentation_slides]
+
+contacts_tools = [
+    search_contacts,
+    list_contacts,
+    get_contact_email]
+
+forms_tools = [
+    create_google_form,
+    add_question_to_form,
+    read_google_form,
+    list_form_responses]
+
 
 print(f"Defined {len(calendar_tools)} tools for the Calendar Expert.")
 print(f"Defined {len(email_tools)} tools for the Email Expert.")
 print(f"Defined {len(search_tools)} tools for the Search Expert.")
 print(f"Defined {len(task_tools)} tools for the Task Expert.")
+print(f"Defined {len(drive_tools)} tools for the Drive Expert.")
+print(f"Defined {len(sheets_tools)} tools for the Sheets Expert.")
+print(f"Defined {len(docs_tools)} tools for the Docs Expert.")
+print(f"Defined {len(slides_tools)} tools for the Slides Expert.")
+print(f"Defined {len(contacts_tools)} tools for the Contacts Expert.")
+print(f"Defined {len(forms_tools)} tools for the Forms Expert.")
 
 
 class AgentState(TypedDict):
     messages: Annotated[list, operator.add]
-    route: Literal["calendar", "email", "search", "conversational", "tasks"]
+    route: Literal["calendar", "email", "search", "conversational", "tasks", "drive", "sheets", "docs", "slides", "contacts", "forms", "vision"]
     error: str
 
 
 class RouteQuery(BaseModel):
     """Route the user's query to the correct expert."""
 
-    route: Literal["calendar", "email", "search", "tasks", "conversational"] = Field(
+    route: Literal["calendar", "email", "search", "tasks", "conversational", "drive", "sheets", "docs", "slides", "contacts", "forms"] = Field(
         description="""The category to route the user's request to, based on their intent.
         - 'calendar': For managing calendar events.
         - 'email': For managing emails.
         - 'search': For general knowledge questions.
         - 'tasks': For managing to-do lists and tasks (e.g., "add a to-do", "list my tasks").
+        - 'drive': For managing files and folders in Google Drive (search, share, create folders, delete files).
+        - 'sheets': For creating or reading/writing data in Google Sheets spreadsheets.
+        - 'docs': For creating, reading, or editing Google Docs documents.
+        - 'slides': For creating or editing Google Slides presentations.
+        - 'contacts': For looking up or listing entries in Google Contacts (e.g., finding someone's email address).
+        - 'forms': For creating Google Forms, adding questions, or checking form responses.
         - 'conversational': For simple chit-chat."""
     )
 
@@ -1020,11 +1733,19 @@ def router_node(state: AgentState):
     to route the task to the appropriate expert, especially for multi-step tasks.
     """
     print("--- Smart Router Node ---")
-    
-    structured_llm_router = llm.with_structured_output(RouteQuery)
-    
+
     messages = state['messages']
-    user_message = messages[-1].content
+    last_message_content = messages[-1].content
+
+    if isinstance(last_message_content, list) and any(
+        isinstance(part, dict) and part.get("type") == "image_url" for part in last_message_content
+    ):
+        print("Smart Router Decision: 'vision' (image attachment detected)")
+        return {"route": "vision"}
+
+    structured_llm_router = llm.with_structured_output(RouteQuery, method="json_schema")
+
+    user_message = last_message_content
     
     last_ai_message_content = ""
     if len(messages) > 1 and isinstance(messages[-2], AIMessage):
@@ -1126,6 +1847,91 @@ Your instructions are:
 """
 
 
+drive_system_prompt = f"""You are an expert at managing Google Drive.
+
+Your instructions are:
+- To answer the user's request, you must use one of the provided tools.
+- Use `search_drive_files` to find files by name, and `list_recent_drive_files` to show recently modified files.
+- CRITICAL RULE for deletion and sharing: You are FORBIDDEN from calling `delete_drive_file` or `share_drive_file` until you have followed this exact sequence:
+    1. First, find the specific file the user is referring to and get its `id`. If there is any ambiguity, you MUST ask the user to clarify which one they mean.
+    2. Second, clearly state the action you are about to take (e.g., "So, you want to share 'Q3 Report' with jane@example.com as a viewer?") and ask for explicit confirmation.
+    3. Only after the user has clearly confirmed, you may call the appropriate tool.
+
+{GENERAL_RULES}
+"""
+
+
+sheets_system_prompt = f"""You are an expert at working with Google Sheets.
+
+Your instructions are:
+- To answer the user's request, you must use one of the provided tools.
+- Use `create_spreadsheet` to make a brand new spreadsheet.
+- Use `read_sheet_values` to read data from a range (A1 notation, e.g. "Sheet1!A1:C10").
+- Use `write_sheet_values` to overwrite a range, and `append_sheet_row` to add a new row at the end.
+- CRITICAL RULE: You are FORBIDDEN from calling `write_sheet_values` if you do not have the `spreadsheet_id`. If you don't have it, ask the user for the spreadsheet ID or link.
+- Before overwriting existing data with `write_sheet_values`, confirm with the user that overwriting is intended.
+
+{GENERAL_RULES}
+"""
+
+
+docs_system_prompt = f"""You are an expert at working with Google Docs.
+
+Your instructions are:
+- To answer the user's request, you must use one of the provided tools.
+- Use `create_google_doc` to make a new document, `read_google_doc` to read one, and `append_to_google_doc` to add text to an existing one.
+- CRITICAL RULE: You are FORBIDDEN from calling `append_to_google_doc` if you do not have the `document_id`. If you don't have it, ask the user for the document ID or link.
+
+{GENERAL_RULES}
+"""
+
+
+slides_system_prompt = f"""You are an expert at working with Google Slides.
+
+Your instructions are:
+- To answer the user's request, you must use one of the provided tools.
+- Use `create_presentation` to make a new presentation, `add_slide_to_presentation` to add a slide, and `list_presentation_slides` to see existing slides.
+- CRITICAL RULE: You are FORBIDDEN from calling `add_slide_to_presentation` or `list_presentation_slides` if you do not have the `presentation_id`. If you don't have it, ask the user for the presentation ID or link.
+
+{GENERAL_RULES}
+"""
+
+
+contacts_system_prompt = f"""You are an expert at looking up Google Contacts.
+
+Your instructions are:
+- To answer the user's request, you must use one of the provided tools.
+- Use `get_contact_email` when the goal is to resolve a person's name into an email address (e.g., before sending an email or inviting them to an event).
+- Use `search_contacts` for broader lookups, and `list_contacts` to show the user's contacts.
+- If a name matches multiple contacts, list the matches and ask the user to clarify which one they mean.
+- This is a read-only expert; you cannot create, edit, or delete contacts.
+
+{GENERAL_RULES}
+"""
+
+
+forms_system_prompt = f"""You are an expert at working with Google Forms.
+
+Your instructions are:
+- To answer the user's request, you must use one of the provided tools.
+- Use `create_google_form` to make a new form, `add_question_to_form` to add a question to it, `read_google_form` to see its current questions, and `list_form_responses` to check submitted responses.
+- CRITICAL RULE: You are FORBIDDEN from calling `add_question_to_form`, `read_google_form`, or `list_form_responses` if you do not have the `form_id`. If you don't have it, ask the user for the form ID or link, or create a new form first.
+- When adding a question, if the type is "MULTIPLE_CHOICE" or "CHECKBOX", you MUST have the list of options before calling the tool; if missing, ask the user for the options.
+
+{GENERAL_RULES}
+"""
+
+
+vision_system_prompt = """You are an expert at analyzing images the user shares with you.
+
+Your instructions are:
+- Carefully look at the image and respond to whatever the user asked about it.
+- If the user didn't ask a specific question, give a clear, useful description of what the image shows: notable objects, text, setting, colors, and anything else relevant.
+- If the image contains text, transcribe the relevant parts accurately.
+- Be concise but thorough. Do not guess at the identity of real people in photos.
+"""
+
+
 llm_with_calendar_tools = llm.bind_tools(calendar_tools)
 calendar_tool_node = ToolNode(calendar_tools)
 
@@ -1170,6 +1976,95 @@ def task_agent_node(state: AgentState):
     return {"messages": [response]}
 
 
+llm_with_drive_tools = llm.bind_tools(drive_tools)
+drive_tool_node = ToolNode(drive_tools)
+
+
+def drive_agent_node(state: AgentState):
+    print("--- Drive Expert Node ---")
+    messages = [SystemMessage(content=drive_system_prompt)] + state['messages']
+    response = llm_with_drive_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+llm_with_sheets_tools = llm.bind_tools(sheets_tools)
+sheets_tool_node = ToolNode(sheets_tools)
+
+
+def sheets_agent_node(state: AgentState):
+    print("--- Sheets Expert Node ---")
+    messages = [SystemMessage(content=sheets_system_prompt)] + state['messages']
+    response = llm_with_sheets_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+llm_with_docs_tools = llm.bind_tools(docs_tools)
+docs_tool_node = ToolNode(docs_tools)
+
+
+def docs_agent_node(state: AgentState):
+    print("--- Docs Expert Node ---")
+    messages = [SystemMessage(content=docs_system_prompt)] + state['messages']
+    response = llm_with_docs_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+llm_with_slides_tools = llm.bind_tools(slides_tools)
+slides_tool_node = ToolNode(slides_tools)
+
+
+def slides_agent_node(state: AgentState):
+    print("--- Slides Expert Node ---")
+    messages = [SystemMessage(content=slides_system_prompt)] + state['messages']
+    response = llm_with_slides_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+llm_with_contacts_tools = llm.bind_tools(contacts_tools)
+contacts_tool_node = ToolNode(contacts_tools)
+
+
+def contacts_agent_node(state: AgentState):
+    print("--- Contacts Expert Node ---")
+    messages = [SystemMessage(content=contacts_system_prompt)] + state['messages']
+    response = llm_with_contacts_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+llm_with_forms_tools = llm.bind_tools(forms_tools)
+forms_tool_node = ToolNode(forms_tools)
+
+
+def forms_agent_node(state: AgentState):
+    print("--- Forms Expert Node ---")
+    messages = [SystemMessage(content=forms_system_prompt)] + state['messages']
+    response = llm_with_forms_tools.invoke(messages)
+    return {"messages": [response]}
+
+
+def vision_agent_node(state: AgentState):
+    print("--- Vision Expert Node ---")
+    # Only the current turn is sent (not the full thread history): keeps each image
+    # analysis independent, avoids re-sending old images, and stays under the
+    # vision model's per-request image-count limit as a conversation grows.
+    last_message = state['messages'][-1]
+    messages = [SystemMessage(content=vision_system_prompt), last_message]
+    try:
+        response = vision_llm.invoke(messages)
+    except Exception as e:
+        print(f"!!! Vision model error: {e}")
+        error_text = str(e)
+        if "rate_limit" in error_text.lower() or "429" in error_text or "413" in error_text:
+            friendly = (
+                "I'm hitting the image-analysis rate limit right now (the free tier only allows a "
+                "handful of image requests per minute). Please wait about a minute and try again."
+            )
+        else:
+            friendly = "Sorry, I couldn't analyze that image right now. Please try again with a different image."
+        response = AIMessage(content=friendly)
+    return {"messages": [response]}
+
+
 def conversational_node(state: AgentState):
 
     print("--- Conversational Node ---")
@@ -1207,6 +2102,19 @@ workflow.add_node("search_tools", search_tool_node)
 workflow.add_node("conversational_agent", conversational_node)
 workflow.add_node("task_agent", task_agent_node)
 workflow.add_node("task_tools", task_tool_node)
+workflow.add_node("drive_agent", drive_agent_node)
+workflow.add_node("drive_tools", drive_tool_node)
+workflow.add_node("sheets_agent", sheets_agent_node)
+workflow.add_node("sheets_tools", sheets_tool_node)
+workflow.add_node("docs_agent", docs_agent_node)
+workflow.add_node("docs_tools", docs_tool_node)
+workflow.add_node("slides_agent", slides_agent_node)
+workflow.add_node("slides_tools", slides_tool_node)
+workflow.add_node("contacts_agent", contacts_agent_node)
+workflow.add_node("contacts_tools", contacts_tool_node)
+workflow.add_node("forms_agent", forms_agent_node)
+workflow.add_node("forms_tools", forms_tool_node)
+workflow.add_node("vision_agent", vision_agent_node)
 
 workflow.set_entry_point("router")
 
@@ -1218,9 +2126,18 @@ workflow.add_conditional_edges(
         "email": "email_agent",
         "search": "search_agent",
         "tasks": "task_agent",
+        "drive": "drive_agent",
+        "sheets": "sheets_agent",
+        "docs": "docs_agent",
+        "slides": "slides_agent",
+        "contacts": "contacts_agent",
+        "forms": "forms_agent",
+        "vision": "vision_agent",
         "conversational": "conversational_agent"
     }
 )
+
+workflow.add_edge("vision_agent", END)
 
 workflow.add_edge("conversational_agent", END)
 
@@ -1236,6 +2153,24 @@ workflow.add_edge("task_tools", "task_agent")
 
 workflow.add_conditional_edges("search_agent", should_call_tools, {"tools": "search_tools", END: END})
 workflow.add_edge("search_tools", "search_agent")
+
+workflow.add_conditional_edges("drive_agent", should_call_tools, {"tools": "drive_tools", END: END})
+workflow.add_edge("drive_tools", "drive_agent")
+
+workflow.add_conditional_edges("sheets_agent", should_call_tools, {"tools": "sheets_tools", END: END})
+workflow.add_edge("sheets_tools", "sheets_agent")
+
+workflow.add_conditional_edges("docs_agent", should_call_tools, {"tools": "docs_tools", END: END})
+workflow.add_edge("docs_tools", "docs_agent")
+
+workflow.add_conditional_edges("slides_agent", should_call_tools, {"tools": "slides_tools", END: END})
+workflow.add_edge("slides_tools", "slides_agent")
+
+workflow.add_conditional_edges("contacts_agent", should_call_tools, {"tools": "contacts_tools", END: END})
+workflow.add_edge("contacts_tools", "contacts_agent")
+
+workflow.add_conditional_edges("forms_agent", should_call_tools, {"tools": "forms_tools", END: END})
+workflow.add_edge("forms_tools", "forms_agent")
 
 DATA_DIR = "data"
 

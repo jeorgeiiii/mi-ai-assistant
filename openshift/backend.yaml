@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: assistant-backend
-          image: berkayalkn/personal-assistant-backend:v2
+          image: youruser/personal-assistant-backend:v1
           ports:
             - containerPort: 5001
           envFrom:

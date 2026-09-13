@@ -19,6 +19,14 @@ interface SidebarProps {
 export default function Sidebar({ threads, activeThreadId, onNewChat, onSelectThread, onRenameThread, onDeleteThread }: SidebarProps) {
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
   const [tempTitle, setTempTitle] = useState('');
+  const [deleteCandidate, setDeleteCandidate] = useState<Thread | null>(null);
+
+  const confirmDelete = () => {
+    if (deleteCandidate) {
+      onDeleteThread(deleteCandidate.id);
+    }
+    setDeleteCandidate(null);
+  };
 
   const handleRename = (thread: Thread) => {
     setEditingThreadId(thread.id);
@@ -41,13 +49,11 @@ export default function Sidebar({ threads, activeThreadId, onNewChat, onSelectTh
   };
 
   return (
-    <div className="w-64 text-white flex flex-col"
-    style={{ backgroundColor: '#1f2937' }}
-    >
-      <div className="p-4 border-b border-gray-700">
+    <div className="w-64 text-white flex flex-col bg-gray-900/70 backdrop-blur-xl border-r border-white/10">
+      <div className="p-4 border-b border-white/10">
         <button
           onClick={onNewChat}
-          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-200"
+          className="w-full bg-[var(--accent)] hover:brightness-110 text-white font-bold py-2 px-4 rounded-lg transition duration-200 shadow-md"
         >
           + New Chat
         </button>
@@ -70,11 +76,11 @@ export default function Sidebar({ threads, activeThreadId, onNewChat, onSelectTh
               ) : (
                 <div
                   onClick={() => onSelectThread(thread.id)}
-                  className={`w-full text-left p-2 rounded truncate text-sm flex justify-between items-center cursor-pointer transition-colors duration-150 ${
-                    activeThreadId === thread.id ? 'bg-gray-600 font-medium' : 'hover:bg-gray-700'
+                  className={`w-full text-left p-2 rounded truncate text-sm flex justify-between items-center cursor-pointer transition-colors duration-150 border-l-4 ${
+                    activeThreadId === thread.id ? 'bg-white/10 font-medium border-[var(--accent)]' : 'border-transparent hover:bg-white/5'
                   }`}
                 >
-                  <span className="text-gray-300"> 
+                  <span className="text-gray-300">
                     {thread.title || thread.id.substring(0, 12) + '...'}
                   </span>
   
@@ -94,13 +100,10 @@ export default function Sidebar({ threads, activeThreadId, onNewChat, onSelectTh
 
                       <button onClick={(e : MouseEvent<HTMLButtonElement>) => {
                         e.stopPropagation();
-                        if (window.confirm("Are you sure you want to delete this chat? This action cannot be undone.")) {
-                          onDeleteThread(thread.id);
-                          onDeleteThread(thread.id);
-                        }
+                        setDeleteCandidate(thread);
                       }}
                       className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 p-1 transition-opacity duration-150"
-                      title="Delete chat" 
+                      title="Delete chat"
                       >
                         🗑️
                       </button>
@@ -110,9 +113,40 @@ export default function Sidebar({ threads, activeThreadId, onNewChat, onSelectTh
           ))}
         </ul>
       </div>
-      <div className="p-4 border-t border-gray-700">
+      <div className="p-4 border-t border-white/10">
         <p className="text-xs text-gray-500">AI Personal Assistant v1.0</p>
       </div>
+
+      {deleteCandidate && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4"
+          onClick={() => setDeleteCandidate(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-white/20 bg-gray-900/90 backdrop-blur-xl p-5 text-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-base font-semibold mb-2">Delete this chat?</h3>
+            <p className="text-sm text-gray-300 mb-5">
+              "<span className="text-gray-100 font-medium">{deleteCandidate.title || deleteCandidate.id}</span>" will be permanently deleted. This action cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteCandidate(null)}
+                className="px-4 py-2 rounded-lg text-sm font-medium text-gray-200 hover:bg-white/10 transition-colors duration-150"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 text-white transition-colors duration-150"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

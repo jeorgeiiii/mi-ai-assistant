@@ -9,6 +9,11 @@ conversations.sqlite
 /venv
 /env
 /.venv
+server/venv/
+server/env/
+server/.venv/
+
+graphify-out/
 
 
 __pycache__/
