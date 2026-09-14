@@ -128,7 +128,7 @@ export default function Sidebar({ threads, activeThreadId, onNewChat, onSelectTh
           >
             <h3 className="text-base font-semibold mb-2">Delete this chat?</h3>
             <p className="text-sm text-gray-300 mb-5">
-              "<span className="text-gray-100 font-medium">{deleteCandidate.title || deleteCandidate.id}</span>" will be permanently deleted. This action cannot be undone.
+              &ldquo;<span className="text-gray-100 font-medium">{deleteCandidate.title || deleteCandidate.id}</span>&rdquo; will be permanently deleted. This action cannot be undone.
             </p>
             <div className="flex justify-end gap-2">
               <button
